@@ -3,76 +3,93 @@ module Transactions
   class CreateForm
     include ActiveModel::Model
 
-    attr_reader :source_wallet, :target_wallet, :amount, :error_message
+    attr_accessor :sender_id, :receiver_id, :amount
+    attr_reader :error_message
 
-    def initialize(params = {})
-      @params = params
-    end
+    def process_transfer
+      ActiveRecord::Base.transaction do
+        load_entities
 
-    # Main entry point to perform the transaction
-    def create
-      create_transaction
+        # Lock them in consistent order to avoid deadlock
+        lock_entities_in_order(@sender, @receiver)
+
+        validate_funds!
+        create_double_entry_rows!
+        create_wallet_snapshots!
+      end
       true
     rescue => e
-      # If an error or Rollback is raised, capture the message and return false
       @error_message = e.message
       false
     end
 
-    # Return a success payload that the controller can render
     def success_response
       {
-        message: "Transaction successful",
-        source_wallet_id: @source_wallet.id,
-        target_wallet_id: @target_wallet.id,
-        amount: @amount.to_s
+        message:          "Transfer successful",
+        sender_balance:   @sender.wallets.order(created_at: :desc).first.balance,
+        receiver_balance: @receiver.wallets.order(created_at: :desc).first.balance
       }
     end
 
     private
 
-    def create_transaction
-      # 1) Parse and fetch required params
-      @source_wallet = Wallet.find(@params[:source_wallet_id])
-      @target_wallet = Wallet.find(@params[:target_wallet_id])
-      @amount        = BigDecimal(@params[:amount])
+    def load_entities
+      @sender   = User.find(sender_id)
+      @receiver = User.find(receiver_id)
+      @amount   = BigDecimal(amount.to_s)
+    end
 
-      # (Optional) authorization logic:
-      # if @source_wallet.owner != @current_user
-      #   raise "You do not have permission to debit this wallet"
-      # end
-
-      # 2) Atomic transaction with row locking
-      ActiveRecord::Base.transaction do
-        lock_wallets_in_order!(@source_wallet, @target_wallet)
-
-        # 3) Ensure no negative balance
-        if @source_wallet.balance < @amount
-          raise ActiveRecord::Rollback, "Insufficient funds in source wallet"
-        end
-
-        # 4) Adjust balances
-        @source_wallet.update!(balance: @source_wallet.balance - @amount)
-        @target_wallet.update!(balance: @target_wallet.balance + @amount)
-
-        # 5) Record the transaction in the ledger
-        Transaction.create!(
-          source_wallet_id: @source_wallet.id,
-          target_wallet_id: @target_wallet.id,
-          amount: @amount
-        )
+    def lock_entities_in_order(user_a, user_b)
+      if user_a.id < user_b.id
+        user_a.lock!
+        user_b.lock!
+      else
+        user_b.lock!
+        user_a.lock!
       end
     end
 
-    def lock_wallets_in_order!(wallet_a, wallet_b)
-      # To avoid potential deadlock, always lock the lower ID first
-      if wallet_a.id < wallet_b.id
-        wallet_a.lock!
-        wallet_b.lock!
-      else
-        wallet_b.lock!
-        wallet_a.lock!
-      end
+    def validate_funds!
+      current_balance = @sender.wallets.order(created_at: :desc).first&.balance || 0
+      raise "Insufficient funds" if current_balance < @amount
+    end
+
+    def create_double_entry_rows!
+      # 1) Sender: Debit
+      Transaction.create!(
+        user_id: @sender.id,
+        debit:   @amount,
+        credit:  0,
+        description: "Transfer to user##{@receiver.id}"
+      )
+
+      # 2) Receiver: Credit
+      Transaction.create!(
+        user_id: @receiver.id,
+        debit:   0,
+        credit:  @amount,
+        description: "Transfer from user##{@sender.id}"
+      )
+    end
+
+    def create_wallet_snapshots!
+      # Recompute fresh balances
+      sender_new_balance   = compute_balance(@sender) - @amount
+      receiver_new_balance = compute_balance(@receiver) + @amount
+
+      @sender.wallets.create!(
+        balance: sender_new_balance,
+        reason:  "Transfer to user##{@receiver.id}"
+      )
+
+      @receiver.wallets.create!(
+        balance: receiver_new_balance,
+        reason:  "Transfer from user##{@sender.id}"
+      )
+    end
+
+    def compute_balance(user)
+      user.wallets.order(created_at: :desc).first&.balance || 0
     end
   end
 end

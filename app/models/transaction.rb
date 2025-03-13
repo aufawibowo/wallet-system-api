@@ -1,28 +1,7 @@
+# app/models/transaction.rb
 class Transaction < ApplicationRecord
-  belongs_to :source_wallet, class_name: "Wallet"
-  belongs_to :target_wallet, class_name: "Wallet"
+  belongs_to :user
 
-  validates :amount, presence: true, numericality: { greater_than: 0 }
-
-  # def self.perform(source:, target:, amount:)
-  #   Wallet.transaction do
-  #     source.lock!
-  #     target.lock!
-  #
-  #     # Validate no negative results
-  #     if source.balance < amount
-  #       raise ActiveRecord::Rollback, "Insufficient funds"
-  #     end
-  #
-  #     source.update!(balance: source.balance - amount)
-  #     target.update!(balance: target.balance + amount)
-  #
-  #     # Record the transaction
-  #     Transaction.create!(
-  #       source_wallet: source,
-  #       target_wallet: target,
-  #       amount: amount
-  #     )
-  #   end
-  # end
+  validates :debit,  numericality: { greater_than_or_equal_to: 0 }
+  validates :credit, numericality: { greater_than_or_equal_to: 0 }
 end
